@@ -10,6 +10,7 @@ from termcolor import cprint
 from pybullet_object_models import ycb_objects
 
 from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
 KUKA_START_POS = [-1.062, -0.529, -0.843, 1.058, 0.875, -0.595, -1.382, -0.15, 0., 0., 0., 0.15, 0., 0., 0., 0., 0., 0., 0., 1.571, 0., 0., 0.]
 
@@ -18,6 +19,11 @@ O_X_PG = np.array([ [-0.30128315, -0.17094008, -0.93808739,  0.16700348],
                     [ 0.59395426,  0.73598689, -0.32487172,  0.18182704],
                     [ 0.        ,  0.        ,  0.        ,  1.        ]
                   ])
+W_X_P = np.array([  [ 0.48611527, -0.37474405, -0.78946745, -0.71594822],
+                    [-0.48752695,  0.63345039, -0.60088109, -0.70437711],
+                    [ 0.72526507,  0.67698413,  0.12523208,  1.21061897],
+                    [ 0.        ,  0.        ,  0.        ,  1.        ]
+                ])
 
 base_x = [0, 0.225, 0, -0.225]
 base_y = [0.225, 0, -0.225, 0]
@@ -54,7 +60,7 @@ class PickAndPlace:
         basket_body = p.createMultiBody(baseMass=0,
                                         baseCollisionShapeIndex=base_shape,
                                         baseVisualShapeIndex=base_visual,
-                                        basePosition=[-0.8, -1, 0],
+                                        basePosition=[-0.8, -0.95, 0],
                                         linkMasses=[0.1] * 4,  # 每个侧面的质量
                                         linkCollisionShapeIndices=side_shapes,
                                         linkVisualShapeIndices=side_visuals,
@@ -134,7 +140,7 @@ class PickAndPlace:
                             init_obj_pos, 
                             [0, 0, -0.5736, 0.8192],
                             flags=flags)
-        p.changeDynamics(obj_id, -1, lateralFriction=10.0, spinningFriction=0.5, rollingFriction=0.2)
+        p.changeDynamics(obj_id, -1, lateralFriction=1.0, spinningFriction=0.5, rollingFriction=0.2)
 
         return obj_id
     
@@ -227,7 +233,7 @@ class PickAndPlace:
         if self.add_debug_line:
             # add debug line to object
             if self.obj_id is not None:
-                objPos, objOrn = self.get_actor_pose(self.obj_id) 
+                objPos, objOrn = self.get_actor_pose(self.obj_id)
                 self.obj_debug_axis_frame = self._add_axis_frame(objPos, objOrn, frame_axis_tuple=self.obj_debug_axis_frame)
 
             # add debug line to ee
@@ -235,39 +241,64 @@ class PickAndPlace:
             self.ee_debug_axis_frame = self._add_axis_frame(eePos, eeOrn, frame_axis_tuple=self.ee_debug_axis_frame, axisLength=0.2)
 
         objPos1, objOrn1 = self.get_actor_pose(self.obj_id)
-        #objPos2, objOrn2 = self.get_link_pose(self.ee_index)
         W_X_O = self._get_X(objPos1, objOrn1)
-        #O_X_W = np.linalg.inv(W_X_O)
-        #W_X_PG = self._get_X(objPos2,objOrn2)
-        #O_X_PG = O_X_W @ W_X_PG
         W_X_PG = W_X_O @ O_X_PG
-        #cprint(f"{O_X_PG}","light_red") 
-        if self.num_step < 1000:
-            # reach pre-grasp pose
-            self._move_robot_ee_pose(*self._X2pose(W_X_PG) )
-            
 
-        elif self.num_step < 1150 and self.num_step >= 1000:
-            # TODO: move down
+        num_step_0 = 100
+        num_step_1 = num_step_0 + 320
+        num_step_2 = num_step_1 + 150
+        num_step_3 = num_step_2 + 350
+        num_step_4 = num_step_3 + 500
+        num_step_5 = num_step_4 + 200
+
+        if self.num_step < num_step_1:
+            self._move_robot_dof(KUKA_START_POS)
+
+        elif self.num_step < num_step_1:
+            self._move_robot_ee_pose(*self._X2pose(W_X_PG))
+        
+        elif self.num_step < num_step_2 and self.num_step >= num_step_1:
             PG_X_G = np.eye(4)
             PG_X_G[2, 3] = 0
             W_X_G = W_X_PG @ PG_X_G
 
             self._move_robot_ee_pose(*self._X2pose(W_X_G))
-            pass
-        elif self.num_step < 1500 and self.num_step >= 1150:            
-             # TODO: close gripper
+        
+        elif self.num_step < num_step_3 and self.num_step >= num_step_2:
             self.close_hand()
             self.grasp_pos, self.grasp_orn = self.get_link_pose(self.ee_index)
+        
+        elif self.num_step < num_step_4 and self.num_step >= num_step_3:
+            # 将1500到2000步之间的操作分为10步
+            # 将1500到2000步之间的操作分为10步
+            step_size = 5  # 每个阶段50步
+            current_stage = (self.num_step - num_step_3) // step_size  # 当前阶段（0到9）
+            total_stages = (num_step_4 - num_step_3) // step_size
 
-        elif self.num_step < 3300 and self.num_step >= 1500:
-             # TODO: up        
-            self.close_hand()
-            self._move_robot_ee_pose((self.grasp_pos[0], self.grasp_pos[1], self.grasp_pos[2] + 0.001 * (self.num_step-1500)), self.grasp_orn)
-            pass
+            # 计算目标位置和旋转的插值
+            start_pos, start_orn = self.grasp_pos, self.grasp_orn
+            end_pos, end_orn = self._X2pose(W_X_P)
+            
+            # 线性插值位置
+            alpha = (current_stage + 1) / total_stages  # 插值比例
+            target_pos = start_pos + alpha * (end_pos - start_pos)
+
+            # 使用 Slerp 插值旋转
+            start_quat = R.from_quat(start_orn)
+            end_quat = R.from_quat(end_orn)
+            
+            # 创建 Slerp 插值器
+            slerp = Slerp([0, 1], R.concatenate([start_quat, end_quat]))
+            target_quat = slerp(alpha)  # 插值
+            target_orn = target_quat.as_quat()
+
+            # 移动到插值后的目标位置和旋转
+            self._move_robot_ee_pose(target_pos, target_orn)
+        elif self.num_step < num_step_5 and self.num_step >= num_step_4:
+            self.open_hand()
         else:
-            self.close_hand()
-            pass
+            self.obj_id = self._add_obj(self.object_names[0])
+            self.num_step = 0
 
         if self.add_arm_joint_params:
             target_pos = []
@@ -281,7 +312,6 @@ class PickAndPlace:
 
         # update 
         self.num_step += 1
-
 
     def _add_axis_frame(self, targetPos, targetOrn, axisLength=0.1, frame_axis_tuple=None):
        
